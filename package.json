@@ -1,0 +1,42 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "Backend API for School Management System",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "db:migrate": "node migrate.js",
+    "db:seed": "node seed.js",
+    "postinstall": "node migrate.js",
+    "build": "echo 'No build step required'",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "engines": {
+    "node": "18.x",
+    "npm": "9.x"
+  },
+  "keywords": [
+    "school",
+    "management",
+    "api",
+    "express",
+    "postgresql",
+    "neondb",
+    "render"
+  ],
+  "author": "Your Name",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.6",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
