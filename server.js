@@ -19,72 +19,335 @@ const DEFAULT_TERM = 1;
 const DEFAULT_YEAR = new Date().getFullYear();
 
 // ==================== DATABASE POOL ====================
-const pool = new Pool({
-  user: process.env.DB_USER,
-  host: process.env.DB_HOST,
-  database: process.env.DB_NAME,
-  password: process.env.DB_PASSWORD,
-  port: process.env.DB_PORT,
-});
+// Parse DATABASE_URL manually to handle special characters
+const isProduction = process.env.NODE_ENV === 'production';
 
-pool.connect((err, client, release) => {
-  if (err) {
-    console.error('Error connecting to database:', err.stack);
+let pool;
+
+try {
+  if (process.env.DATABASE_URL) {
+    // For Render or when DATABASE_URL is provided
+    console.log('Using DATABASE_URL for connection');
+
+    // Parse the URL to ensure password is properly handled
+    const dbUrl = new URL(process.env.DATABASE_URL);
+
+    pool = new Pool({
+      user: decodeURIComponent(dbUrl.username),
+      password: decodeURIComponent(dbUrl.password), // Decode special characters
+      host: dbUrl.hostname,
+      port: parseInt(dbUrl.port || '5432'),
+      database: dbUrl.pathname.substring(1), // Remove leading '/'
+      ssl: isProduction ? { rejectUnauthorized: false } : false
+    });
+  } else {
+    // Fallback to individual parameters for local development
+    console.log('Using individual DB parameters for connection');
+    pool = new Pool({
+      user: process.env.DB_USER || 'postgres',
+      host: process.env.DB_HOST || 'localhost',
+      database: process.env.DB_NAME || 'ophunzira',
+      password: process.env.DB_PASSWORD ? String(process.env.DB_PASSWORD) : 'postgres', // Ensure string
+      port: parseInt(process.env.DB_PORT || '5432'),
+      ssl: isProduction ? { rejectUnauthorized: false } : false
+    });
+  }
+
+  // Test the connection
+  pool.connect((err, client, release) => {
+    if (err) {
+      console.error('❌ Error connecting to database:', err.message);
+      console.error('Connection details:');
+      console.error(`  - Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.error(`  - SSL Enabled: ${isProduction ? 'Yes' : 'No'}`);
+      console.error(`  - Database: ${process.env.DB_NAME || 'from DATABASE_URL'}`);
+
+      if (err.message.includes('password must be a string')) {
+        console.error('\n💡 PASSWORD ISSUE DETECTED:');
+        console.error('   Your password contains special characters that need proper encoding.');
+        console.error('   Fix options:');
+        console.error('   1. URL-encode your password in DATABASE_URL');
+        console.error('   2. Use individual DB_* parameters instead');
+        console.error('   3. Simplify your password (remove special chars temporarily)\n');
+      }
+
+      // Don't exit in development
+      if (isProduction) {
+        process.exit(1);
+      }
+    } else {
+      console.log('✅ Connected to PostgreSQL database');
+      release();
+    }
+  });
+} catch (err) {
+  console.error('❌ Failed to create database pool:', err.message);
+  if (isProduction) {
     process.exit(1);
   }
-  console.log('✅ Connected to PostgreSQL');
-  release();
-});
+}
 
 // ==================== DATABASE INITIALIZATION ====================
 (async () => {
   try {
-    // Audit logs table
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS audit_logs (
-        id SERIAL PRIMARY KEY,
-        user_id INT REFERENCES users(id) ON DELETE SET NULL,
-        action VARCHAR(255) NOT NULL,
-        details TEXT,
-        ip_address INET,
-        created_at TIMESTAMP DEFAULT NOW()
+    // Check if tables exist and create them if they don't
+
+    // First, check if users table exists (core table)
+    const usersTableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_name = 'users'
       );
     `);
-    console.log('✅ Audit logs table ready');
+
+    if (!usersTableCheck.rows[0].exists) {
+      console.log('Creating users table...');
+      await pool.query(`
+        CREATE TABLE users (
+          id SERIAL PRIMARY KEY,
+          username VARCHAR(100) UNIQUE NOT NULL,
+          email VARCHAR(255) UNIQUE NOT NULL,
+          password_hash VARCHAR(255) NOT NULL,
+          role VARCHAR(50) NOT NULL DEFAULT 'teacher',
+          class_id INTEGER,
+          phone VARCHAR(20),
+          address TEXT,
+          department VARCHAR(100),
+          specialization VARCHAR(100),
+          profile_pic_url TEXT,
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW()
+        );
+      `);
+      console.log('✅ Users table created');
+    }
+
+    // Check if learners table exists
+    const learnersTableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_name = 'learners'
+      );
+    `);
+
+    if (!learnersTableCheck.rows[0].exists) {
+      console.log('Creating learners table...');
+      await pool.query(`
+        CREATE TABLE learners (
+          id SERIAL PRIMARY KEY,
+          username VARCHAR(100) NOT NULL,
+          reg_number VARCHAR(50) UNIQUE NOT NULL,
+          class_id INTEGER REFERENCES classes(id) ON DELETE SET NULL,
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW()
+        );
+      `);
+      console.log('✅ Learners table created');
+    }
+
+    // Check if classes table exists
+    const classesTableCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_name = 'classes'
+      );
+    `);
+
+    if (!classesTableCheck.rows[0].exists) {
+      console.log('Creating classes table...');
+      await pool.query(`
+        CREATE TABLE classes (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(100) NOT NULL,
+          year INTEGER NOT NULL,
+          teacher_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW()
+        );
+      `);
+      console.log('✅ Classes table created');
+    }
+
+    // Audit logs table
+    const auditLogsCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_name = 'audit_logs'
+      );
+    `);
+
+    if (!auditLogsCheck.rows[0].exists) {
+      await pool.query(`
+        CREATE TABLE audit_logs (
+          id SERIAL PRIMARY KEY,
+          user_id INT REFERENCES users(id) ON DELETE SET NULL,
+          action VARCHAR(255) NOT NULL,
+          details TEXT,
+          ip_address INET,
+          created_at TIMESTAMP DEFAULT NOW()
+        );
+      `);
+      console.log('✅ Audit logs table created');
+    }
 
     // Term settings table
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS term_settings (
-        id SERIAL PRIMARY KEY,
-        class_id INTEGER REFERENCES classes(id) ON DELETE CASCADE,
-        term INTEGER NOT NULL,
-        year INTEGER NOT NULL,
-        total_days INTEGER NOT NULL DEFAULT 30,
-        created_at TIMESTAMP DEFAULT NOW(),
-        updated_at TIMESTAMP DEFAULT NOW(),
-        UNIQUE(class_id, term, year)
+    const termSettingsCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_name = 'term_settings'
       );
     `);
-    console.log('✅ Term settings table ready');
+
+    if (!termSettingsCheck.rows[0].exists) {
+      await pool.query(`
+        CREATE TABLE term_settings (
+          id SERIAL PRIMARY KEY,
+          class_id INTEGER REFERENCES classes(id) ON DELETE CASCADE,
+          term INTEGER NOT NULL,
+          year INTEGER NOT NULL,
+          total_days INTEGER NOT NULL DEFAULT 30,
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW(),
+          UNIQUE(class_id, term, year)
+        );
+      `);
+      console.log('✅ Term settings table created');
+    }
 
     // Announcements table
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS announcements (
-        id SERIAL PRIMARY KEY,
-        teacher_id INT REFERENCES users(id) ON DELETE SET NULL,
-        title VARCHAR(255) NOT NULL,
-        content TEXT NOT NULL,
-        target_class_id INT REFERENCES classes(id) ON DELETE CASCADE,
-        target_all BOOLEAN DEFAULT false,
-        priority VARCHAR(20) DEFAULT 'normal',
-        expires_at TIMESTAMP,
-        created_at TIMESTAMP DEFAULT NOW(),
-        updated_at TIMESTAMP DEFAULT NOW()
+    const announcementsCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_name = 'announcements'
       );
     `);
-    console.log('✅ Announcements table ready');
 
-    // Check for updated_at column
+    if (!announcementsCheck.rows[0].exists) {
+      await pool.query(`
+        CREATE TABLE announcements (
+          id SERIAL PRIMARY KEY,
+          teacher_id INT REFERENCES users(id) ON DELETE SET NULL,
+          title VARCHAR(255) NOT NULL,
+          content TEXT NOT NULL,
+          target_class_id INT REFERENCES classes(id) ON DELETE CASCADE,
+          target_all BOOLEAN DEFAULT false,
+          priority VARCHAR(20) DEFAULT 'normal',
+          expires_at TIMESTAMP,
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW()
+        );
+      `);
+      console.log('✅ Announcements table created');
+    }
+
+    // Subject templates table
+    const subjectTemplatesCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_name = 'subject_templates'
+      );
+    `);
+
+    if (!subjectTemplatesCheck.rows[0].exists) {
+      await pool.query(`
+        CREATE TABLE subject_templates (
+          id SERIAL PRIMARY KEY,
+          class_id INTEGER REFERENCES classes(id) ON DELETE CASCADE,
+          subject_name VARCHAR(100) NOT NULL,
+          total_marks INTEGER NOT NULL DEFAULT 100,
+          display_order INTEGER DEFAULT 0,
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW()
+        );
+      `);
+      console.log('✅ Subject templates table created');
+    }
+
+    // Attendance table
+    const attendanceCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_name = 'attendance'
+      );
+    `);
+
+    if (!attendanceCheck.rows[0].exists) {
+      await pool.query(`
+        CREATE TABLE attendance (
+          id SERIAL PRIMARY KEY,
+          learner_id INTEGER REFERENCES learners(id) ON DELETE CASCADE,
+          date DATE NOT NULL,
+          status VARCHAR(20) NOT NULL,
+          teacher_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          attendance_date DATE,
+          term INTEGER DEFAULT 1,
+          year INTEGER DEFAULT EXTRACT(YEAR FROM CURRENT_DATE),
+          created_at TIMESTAMP DEFAULT NOW(),
+          UNIQUE(learner_id, date)
+        );
+      `);
+      console.log('✅ Attendance table created');
+    }
+
+    // Subject results table
+    const subjectResultsCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_name = 'subject_results'
+      );
+    `);
+
+    if (!subjectResultsCheck.rows[0].exists) {
+      await pool.query(`
+        CREATE TABLE subject_results (
+          id SERIAL PRIMARY KEY,
+          learner_id INTEGER REFERENCES learners(id) ON DELETE CASCADE,
+          template_id INTEGER REFERENCES subject_templates(id) ON DELETE CASCADE,
+          term INTEGER NOT NULL,
+          year INTEGER NOT NULL,
+          test1_score INTEGER DEFAULT 0,
+          test2_score INTEGER DEFAULT 0,
+          exam_score INTEGER DEFAULT 0,
+          marks_scored INTEGER DEFAULT 0,
+          grade VARCHAR(5),
+          remarks TEXT,
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW(),
+          UNIQUE(learner_id, template_id, term, year)
+        );
+      `);
+      console.log('✅ Subject results table created');
+    }
+
+    // Report cards table
+    const reportCardsCheck = await pool.query(`
+      SELECT EXISTS (
+        SELECT FROM information_schema.tables
+        WHERE table_name = 'report_cards'
+      );
+    `);
+
+    if (!reportCardsCheck.rows[0].exists) {
+      await pool.query(`
+        CREATE TABLE report_cards (
+          id SERIAL PRIMARY KEY,
+          learner_id INTEGER REFERENCES learners(id) ON DELETE CASCADE,
+          term INTEGER NOT NULL,
+          year INTEGER NOT NULL,
+          attendance_days INTEGER DEFAULT 0,
+          teacher_comment TEXT,
+          conduct VARCHAR(50),
+          position INTEGER,
+          pass_fail_status VARCHAR(20) DEFAULT 'PENDING',
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW(),
+          UNIQUE(learner_id, term, year)
+        );
+      `);
+      console.log('✅ Report cards table created');
+    }
+
+    // Check for updated_at column in users table
     const columnCheck = await pool.query(`
       SELECT column_name
       FROM information_schema.columns
@@ -98,8 +361,11 @@ pool.connect((err, client, release) => {
       `);
       console.log('✅ Added updated_at column to users table');
     }
+
+    console.log('✅ All database tables are ready');
   } catch (err) {
     console.error('Error setting up database:', err);
+    // Don't exit here - tables might already exist with slightly different schema
   }
 })();
 
@@ -185,15 +451,28 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'OK',
     timestamp: new Date().toISOString(),
-    database: process.env.DB_USER ? 'configured' : 'not configured'
+    database: process.env.DATABASE_URL ? 'configured' : 'not configured'
   });
 });
 
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
+  // Test database connection
+  let dbStatus = 'disconnected';
+  try {
+    await pool.query('SELECT 1');
+    dbStatus = 'connected';
+  } catch (err) {
+    console.error('Health check database error:', err.message);
+  }
+
   res.json({
     status: 'OK',
     timestamp: new Date().toISOString(),
-    database: process.env.DB_USER ? 'configured' : 'not configured',
+    database: dbStatus,
+    environment: {
+      node_version: process.version,
+      platform: process.platform
+    },
     endpoints: {
       auth: ['/login', '/learner-login', '/verify'],
       profile: ['/teacher/profile', '/teacher/upload-profile-pic', '/teacher/change-password'],
