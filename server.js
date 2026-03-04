@@ -370,12 +370,34 @@ try {
 })();
 
 // ==================== MIDDLEWARE ====================
+// Updated CORS to allow your Netlify frontend
+const allowedOrigins = [
+  'https://sukulu.netlify.app',
+  'http://localhost:5000',
+  'http://localhost:3000',
+  'http://localhost:8080',
+  'http://127.0.0.1:5000',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:8080'
+];
+
 app.use(cors({
-  origin: '*',
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.indexOf(origin) === -1 && origin !== 'null') {
+      console.log('Blocked origin:', origin);
+      return callback(null, false);
+    }
+    return callback(null, true);
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
-  credentials: true
+  credentials: true,
+  optionsSuccessStatus: 200
 }));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -447,6 +469,20 @@ const logAdminAction = async (userId, action, details, ip) => {
 };
 
 // ==================== HEALTH CHECK ENDPOINTS ====================
+app.get('/', (req, res) => {
+  res.json({
+    name: 'Ophunzira API',
+    version: '1.0.0',
+    status: 'running',
+    endpoints: {
+      health: '/health',
+      apiHealth: '/api/health',
+      test: '/api/test'
+    },
+    documentation: 'See /api/health for all available endpoints'
+  });
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'OK',
@@ -471,10 +507,11 @@ app.get('/api/health', async (req, res) => {
     database: dbStatus,
     environment: {
       node_version: process.version,
-      platform: process.platform
+      platform: process.platform,
+      production: isProduction
     },
     endpoints: {
-      auth: ['/login', '/learner-login', '/verify'],
+      auth: ['/login', '/api/login', '/learner-login', '/verify'],
       profile: ['/teacher/profile', '/teacher/upload-profile-pic', '/teacher/change-password'],
       classes: ['/api/classes'],
       learners: ['/api/teacher/learners/:classId'],
@@ -529,6 +566,59 @@ app.get('/api/test-classes', async (req, res) => {
 });
 
 // ==================== AUTHENTICATION ROUTES ====================
+// API Login endpoint (for Flutter app)
+app.post('/api/login', async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password required' });
+    }
+
+    const result = await pool.query(
+      `SELECT id, username, email, password_hash, role, class_id,
+              phone, address, department, specialization, profile_pic_url,
+              created_at
+       FROM users
+       WHERE email = $1`,
+      [email]
+    );
+
+    const user = result.rows[0];
+
+    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const token = jwt.sign(
+      { userId: user.id, role: user.role, username: user.username, email: user.email },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        class_id: user.class_id,
+        phone: user.phone || '',
+        address: user.address || '',
+        department: user.department || '',
+        specialization: user.specialization || '',
+        profile_pic_url: user.profile_pic_url || '',
+        created_at: user.created_at,
+      },
+    });
+  } catch (err) {
+    console.error('Login error:', err);
+    next(err);
+  }
+});
+
+// Legacy login endpoint (maintain for backward compatibility)
 app.post('/login', async (req, res, next) => {
   try {
     const { email, password } = req.body;
@@ -553,7 +643,7 @@ app.post('/login', async (req, res, next) => {
     }
 
     const token = jwt.sign(
-      { userId: user.id, role: user.role, username: user.username },
+      { userId: user.id, role: user.role, username: user.username, email: user.email },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -602,7 +692,7 @@ app.post('/learner-login', async (req, res, next) => {
     }
 
     const token = jwt.sign(
-      { userId: learner.id, role: 'learner', username: learner.username },
+      { userId: learner.id, role: 'learner', username: learner.username, regNumber: learner.reg_number },
       JWT_SECRET,
       { expiresIn: '24h' }
     );
@@ -2552,7 +2642,7 @@ app.use((req, res) => {
 });
 
 // ==================== START SERVER ====================
-app.listen(port, () => {
+app.listen(port, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${port}`);
   console.log(`📝 Health check: http://localhost:${port}/health`);
   console.log(`🔍 API status: http://localhost:${port}/api/health`);
@@ -2563,6 +2653,7 @@ app.listen(port, () => {
   console.log(`   - DELETE /api/teacher/announcements/:id`);
   console.log(`   - GET    /api/learner/announcements`);
   console.log(`📊 Attendance endpoints updated with term/year filtering`);
+  console.log(`🌐 CORS enabled for: https://sukulu.netlify.app`);
 });
 
 module.exports = app;
