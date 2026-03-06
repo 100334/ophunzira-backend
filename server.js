@@ -535,7 +535,7 @@ app.get('/api/health', async (req, res) => {
       production: isProduction
     },
     endpoints: {
-      auth: ['/login', '/api/login', '/learner-login', '/verify'],
+      auth: ['/login', '/api/login', '/leaner-login', '/verify'],
       profile: ['/teacher/profile', '/teacher/upload-profile-pic', '/teacher/change-password'],
       classes: ['/api/classes'],
       learners: ['/api/teacher/learners/:classId'],
@@ -742,7 +742,7 @@ app.post('/login', async (req, res, next) => {
   }
 });
 
-app.post('/learner-login', async (req, res, next) => {
+app.post('/leaner-login', async (req, res, next) => {
   try {
     const { username, registrationNumber } = req.body;
 
