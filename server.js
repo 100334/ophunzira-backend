@@ -19,37 +19,41 @@ const DEFAULT_TERM = 1;
 const DEFAULT_YEAR = new Date().getFullYear();
 
 // ==================== DATABASE POOL ====================
-// Parse DATABASE_URL manually to handle special characters
 const isProduction = process.env.NODE_ENV === 'production';
 
 let pool;
 
 try {
   if (process.env.DATABASE_URL) {
-    // For Render or when DATABASE_URL is provided
     console.log('Using DATABASE_URL for connection');
+    console.log(`Connecting to database: ${new URL(process.env.DATABASE_URL).pathname.substring(1)}`);
 
-    // Parse the URL to ensure password is properly handled
     const dbUrl = new URL(process.env.DATABASE_URL);
 
     pool = new Pool({
       user: decodeURIComponent(dbUrl.username),
-      password: decodeURIComponent(dbUrl.password), // Decode special characters
+      password: decodeURIComponent(dbUrl.password),
       host: dbUrl.hostname,
       port: parseInt(dbUrl.port || '5432'),
-      database: dbUrl.pathname.substring(1), // Remove leading '/'
-      ssl: isProduction ? { rejectUnauthorized: false } : false
+      database: dbUrl.pathname.substring(1),
+      ssl: isProduction ? { rejectUnauthorized: false } : false,
+      // Connection pool optimizations
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000,
     });
   } else {
-    // Fallback to individual parameters for local development
     console.log('Using individual DB parameters for connection');
     pool = new Pool({
       user: process.env.DB_USER || 'postgres',
       host: process.env.DB_HOST || 'localhost',
       database: process.env.DB_NAME || 'ophunzira',
-      password: process.env.DB_PASSWORD ? String(process.env.DB_PASSWORD) : 'postgres', // Ensure string
+      password: process.env.DB_PASSWORD ? String(process.env.DB_PASSWORD) : 'postgres',
       port: parseInt(process.env.DB_PORT || '5432'),
-      ssl: isProduction ? { rejectUnauthorized: false } : false
+      ssl: isProduction ? { rejectUnauthorized: false } : false,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000,
     });
   }
 
@@ -71,15 +75,27 @@ try {
         console.error('   3. Simplify your password (remove special chars temporarily)\n');
       }
 
-      // Don't exit in development
       if (isProduction) {
         process.exit(1);
       }
     } else {
       console.log('✅ Connected to PostgreSQL database');
-      release();
+
+      // Log which database we're connected to
+      client.query('SELECT current_database()', (err, result) => {
+        if (!err) {
+          console.log(`📊 Connected to database: ${result.rows[0].current_database}`);
+        }
+        release();
+      });
     }
   });
+
+  // Add pool error handler
+  pool.on('error', (err) => {
+    console.error('Unexpected database pool error:', err);
+  });
+
 } catch (err) {
   console.error('❌ Failed to create database pool:', err.message);
   if (isProduction) {
@@ -363,14 +379,21 @@ try {
     }
 
     console.log('✅ All database tables are ready');
+
+    // Log table count
+    const tablesCount = await pool.query(`
+      SELECT COUNT(*) as count
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+    `);
+    console.log(`📊 Total tables in database: ${tablesCount.rows[0].count}`);
+
   } catch (err) {
     console.error('Error setting up database:', err);
-    // Don't exit here - tables might already exist with slightly different schema
   }
 })();
 
 // ==================== MIDDLEWARE ====================
-// Updated CORS to allow your Netlify frontend
 const allowedOrigins = [
   'https://sukulu.netlify.app',
   'http://localhost:5000',
@@ -383,9 +406,7 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
-
     if (allowedOrigins.indexOf(origin) === -1 && origin !== 'null') {
       console.log('Blocked origin:', origin);
       return callback(null, false);
@@ -420,7 +441,6 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Admin middleware
 const authenticateAdmin = (req, res, next) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({
@@ -477,7 +497,8 @@ app.get('/', (req, res) => {
     endpoints: {
       health: '/health',
       apiHealth: '/api/health',
-      test: '/api/test'
+      test: '/api/test',
+      testConnection: '/api/test-connection'
     },
     documentation: 'See /api/health for all available endpoints'
   });
@@ -492,11 +513,13 @@ app.get('/health', (req, res) => {
 });
 
 app.get('/api/health', async (req, res) => {
-  // Test database connection
   let dbStatus = 'disconnected';
+  let dbName = 'unknown';
+
   try {
-    await pool.query('SELECT 1');
+    const result = await pool.query('SELECT current_database()');
     dbStatus = 'connected';
+    dbName = result.rows[0].current_database;
   } catch (err) {
     console.error('Health check database error:', err.message);
   }
@@ -505,6 +528,7 @@ app.get('/api/health', async (req, res) => {
     status: 'OK',
     timestamp: new Date().toISOString(),
     database: dbStatus,
+    database_name: dbName,
     environment: {
       node_version: process.version,
       platform: process.platform,
@@ -539,7 +563,8 @@ app.get('/api/health', async (req, res) => {
         '/api/admin/subjects/:classId',
         '/api/admin/learners',
         '/api/admin/audit-logs'
-      ]
+      ],
+      test: ['/api/test-connection']
     }
   });
 });
@@ -552,21 +577,69 @@ app.get('/api/test', (req, res) => {
   });
 });
 
-app.get('/api/test-classes', async (req, res) => {
+// ==================== TEST CONNECTION ENDPOINT ====================
+app.get('/api/test-connection', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM classes');
+    // Test basic connection
+    const dbResult = await pool.query('SELECT current_database() as db_name');
+    const currentDb = dbResult.rows[0].db_name;
+
+    // Test if we can create a test table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS connection_test (
+        id SERIAL PRIMARY KEY,
+        test_message VARCHAR(100),
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+
+    // Insert a test record
+    await pool.query(
+      'INSERT INTO connection_test (test_message) VALUES ($1)',
+      ['Connection test at ' + new Date().toISOString()]
+    );
+
+    // Retrieve the test records
+    const testResults = await pool.query(
+      'SELECT * FROM connection_test ORDER BY created_at DESC LIMIT 5'
+    );
+
+    // Get list of all tables
+    const tablesResult = await pool.query(`
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'public'
+      ORDER BY table_name
+    `);
+
     res.json({
       success: true,
-      count: result.rows.length,
-      classes: result.rows
+      message: 'Database connection is working!',
+      database: {
+        current_database: currentDb,
+        connection_status: 'connected',
+        environment: process.env.NODE_ENV || 'development'
+      },
+      tables: {
+        count: tablesResult.rows.length,
+        list: tablesResult.rows.map(row => row.table_name)
+      },
+      test_data: testResults.rows,
+      timestamp: new Date().toISOString()
     });
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Test connection error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Database connection test failed',
+      error: err.message,
+      hint: 'Check your DATABASE_URL environment variable and ensure the database exists'
+    });
   }
 });
 
 // ==================== AUTHENTICATION ROUTES ====================
-// API Login endpoint (for Flutter app)
 app.post('/api/login', async (req, res, next) => {
   try {
     const { email, password } = req.body;
@@ -618,7 +691,6 @@ app.post('/api/login', async (req, res, next) => {
   }
 });
 
-// Legacy login endpoint (maintain for backward compatibility)
 app.post('/login', async (req, res, next) => {
   try {
     const { email, password } = req.body;
@@ -1069,7 +1141,6 @@ app.get('/api/attendance/count/:learnerId', authenticateToken, async (req, res, 
   }
 });
 
-// FIXED: Get learner's attendance stats with term and year filtering
 app.get('/api/learner/attendance-stats', authenticateToken, async (req, res, next) => {
   try {
     const learnerId = req.user.userId;
@@ -1104,7 +1175,6 @@ app.get('/api/learner/attendance-stats', authenticateToken, async (req, res, nex
   }
 });
 
-// FIXED: Get today's attendance for learner
 app.get('/api/learner/attendance/today', authenticateToken, async (req, res, next) => {
   try {
     const learnerId = req.user.userId;
@@ -1862,7 +1932,7 @@ app.get('/api/learner/announcements', authenticateToken, async (req, res) => {
   }
 });
 
-// ==================== LEGACY ROUTES (Redirect to API) ====================
+// ==================== LEGACY ROUTES ====================
 app.get('/attendance/count/:learnerId', authenticateToken, (req, res) => {
   const { learnerId } = req.params;
   const { term, year } = req.query;
@@ -2641,11 +2711,19 @@ app.use((req, res) => {
   });
 });
 
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, closing database pool...');
+  await pool.end();
+  process.exit(0);
+});
+
 // ==================== START SERVER ====================
 app.listen(port, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${port}`);
   console.log(`📝 Health check: http://localhost:${port}/health`);
   console.log(`🔍 API status: http://localhost:${port}/api/health`);
+  console.log(`🔧 Test connection: http://localhost:${port}/api/test-connection`);
   console.log(`✅ All API endpoints use /api prefix consistently`);
   console.log(`📢 Announcement endpoints added:`);
   console.log(`   - POST   /api/teacher/announcements`);
