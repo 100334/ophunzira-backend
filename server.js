@@ -393,38 +393,89 @@ try {
   }
 })();
 
-// ==================== MIDDLEWARE ====================
-const allowedOrigins = [
-  'https://sukulu.netlify.app',
-  'http://localhost:5000',
-  'http://localhost:3000',
-  'http://localhost:8080',
-  'http://127.0.0.1:5000',
-  'http://127.0.0.1:3000',
-  'http://127.0.0.1:8080'
+// ==================== CORS CONFIGURATION ====================
+// Define allowed origins for production
+const productionOrigins = [
+  'https://ophunzira.netlify.app',
+  'https://ophunzira-backend.onrender.com',
+   'http://localhost:5000',
+    'http://localhost:3000',
+    'http://localhost:8080',
+    'http://127.0.0.1:5000',
+    'http://127.0.0.1:3000',
+    'http://10.0.2.2:5000', // Android emulator
 ];
 
+// Function to check if origin is allowed
+const isOriginAllowed = (origin) => {
+  // Allow requests with no origin (like mobile apps, curl, Postman)
+  if (!origin) return true;
+
+  // In development, allow all localhost origins
+  if (process.env.NODE_ENV !== 'production') {
+    if (origin.startsWith('http://localhost:') ||
+        origin.startsWith('http://127.0.0.1:') ||
+        origin.startsWith('http://10.0.2.2:')) { // For Android emulator
+      return true;
+    }
+  }
+
+  // Check against production origins list
+  return productionOrigins.includes(origin);
+};
+
+// CORS middleware
 app.use(cors({
   origin: function(origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) === -1 && origin !== 'null') {
-      console.log('Blocked origin:', origin);
-      return callback(null, false);
+    if (isOriginAllowed(origin)) {
+      callback(null, true);
+    } else {
+      console.log('🚫 Blocked origin:', origin);
+      callback(new Error('Not allowed by CORS'));
     }
-    return callback(null, true);
   },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Accept',
+    'Origin',
+    'X-Requested-With'
+  ],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
   credentials: true,
-  optionsSuccessStatus: 200
+  optionsSuccessStatus: 200,
+  maxAge: 86400 // 24 hours
 }));
+
+// Handle preflight requests explicitly
+app.options('*', cors());
+
+// Add CORS headers manually as a backup
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  if (isOriginAllowed(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin, X-Requested-With');
+  }
+
+  // Handle preflight
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+
+  next();
+});
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Request logger
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url} - Origin: ${req.headers.origin || 'No origin'}`);
   next();
 });
 
@@ -500,7 +551,14 @@ app.get('/', (req, res) => {
       test: '/api/test',
       testConnection: '/api/test-connection'
     },
-    documentation: 'See /api/health for all available endpoints'
+    documentation: 'See /api/health for all available endpoints',
+    cors: {
+      status: 'enabled',
+      environment: process.env.NODE_ENV || 'development',
+      allowedOrigins: process.env.NODE_ENV === 'production'
+        ? productionOrigins
+        : 'All localhost origins'
+    }
   });
 });
 
@@ -508,7 +566,11 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'OK',
     timestamp: new Date().toISOString(),
-    database: process.env.DATABASE_URL ? 'configured' : 'not configured'
+    database: process.env.DATABASE_URL ? 'configured' : 'not configured',
+    cors: {
+      origin: req.headers.origin || 'No origin',
+      allowed: isOriginAllowed(req.headers.origin)
+    }
   });
 });
 
@@ -532,7 +594,13 @@ app.get('/api/health', async (req, res) => {
     environment: {
       node_version: process.version,
       platform: process.platform,
-      production: isProduction
+      production: isProduction,
+      node_env: process.env.NODE_ENV || 'development'
+    },
+    cors: {
+      origin: req.headers.origin || 'No origin',
+      allowed: isOriginAllowed(req.headers.origin),
+      environment: process.env.NODE_ENV || 'development'
     },
     endpoints: {
       auth: ['/login', '/api/login', '/leaner-login', '/verify'],
@@ -625,6 +693,10 @@ app.get('/api/test-connection', async (req, res) => {
         list: tablesResult.rows.map(row => row.table_name)
       },
       test_data: testResults.rows,
+      cors: {
+        origin: req.headers.origin || 'No origin',
+        allowed: isOriginAllowed(req.headers.origin)
+      },
       timestamp: new Date().toISOString()
     });
 
@@ -2720,18 +2792,30 @@ process.on('SIGTERM', async () => {
 
 // ==================== START SERVER ====================
 app.listen(port, '0.0.0.0', () => {
+  console.log('\n' + '='.repeat(60));
   console.log(`🚀 Server running on port ${port}`);
+  console.log('='.repeat(60));
   console.log(`📝 Health check: http://localhost:${port}/health`);
   console.log(`🔍 API status: http://localhost:${port}/api/health`);
   console.log(`🔧 Test connection: http://localhost:${port}/api/test-connection`);
-  console.log(`✅ All API endpoints use /api prefix consistently`);
-  console.log(`📢 Announcement endpoints added:`);
+  console.log('\n' + '-'.repeat(60));
+  console.log('🌐 CORS Configuration:');
+  console.log(`   Environment: ${process.env.NODE_ENV || 'development'}`);
+  if (process.env.NODE_ENV === 'production') {
+    console.log('   Allowed origins:');
+    productionOrigins.forEach(origin => console.log(`   - ${origin}`));
+  } else {
+    console.log('   ✓ All localhost origins allowed');
+    console.log('   ✓ Android emulator (10.0.2.2) allowed');
+    console.log('   ✓ All common development ports allowed');
+  }
+  console.log('-'.repeat(60));
+  console.log('\n📢 Announcement endpoints:');
   console.log(`   - POST   /api/teacher/announcements`);
   console.log(`   - GET    /api/teacher/announcements`);
   console.log(`   - DELETE /api/teacher/announcements/:id`);
   console.log(`   - GET    /api/learner/announcements`);
-  console.log(`📊 Attendance endpoints updated with term/year filtering`);
-  console.log(`🌐 CORS enabled for: https://sukulu.netlify.app`);
+  console.log('='.repeat(60) + '\n');
 });
 
-module.exports = app;
+module.exports = app;a
